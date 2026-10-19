@@ -1,4 +1,5 @@
 import os
+from decimal import Decimal
 
 import pandas as pd
 import psycopg2
@@ -74,7 +75,7 @@ def sign_out():
 
     # Clear cached quiz answers and text area values
     for key in list(st.session_state.keys()):
-        if key.startswith(("loaded_answers_", "answer_")):
+        if key.startswith(("loaded_answers_", "answer_", "grading_results_")):
             del st.session_state[key]
 
 
@@ -283,6 +284,31 @@ ORDER BY rating DESC;
 
 
 # ============================================================
+# 4b. Automatic Grading
+# ============================================================
+
+def normalize_cell(value):
+    """Normalize numeric values returned by psycopg2 for fair comparison."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float, Decimal)):
+        return Decimal(str(value)).normalize()
+    return value
+
+
+def grade_sql_answer(user_columns, user_rows, expected_columns, expected_rows):
+    """Compare result sets, not SQL text. Ordering matters for these questions."""
+    if list(user_columns) != list(expected_columns):
+        return False
+    if len(user_rows) != len(expected_rows):
+        return False
+    for user_row, expected_row in zip(user_rows, expected_rows):
+        if tuple(map(normalize_cell, user_row)) != tuple(map(normalize_cell, expected_row)):
+            return False
+    return True
+
+
+# ============================================================
 # 5. Page Header
 # ============================================================
 
@@ -476,6 +502,12 @@ if answers_state_key not in st.session_state:
 
 saved_answers = st.session_state[answers_state_key]
 
+# Grades are temporary and tied to the exact SQL that was last executed.
+grading_state_key = f"grading_results_{user_id}"
+if grading_state_key not in st.session_state:
+    st.session_state[grading_state_key] = {}
+grading_results = st.session_state[grading_state_key]
+
 
 # ============================================================
 # 9. Display Questions
@@ -550,24 +582,40 @@ for question in QUESTIONS:
                             columns=columns,
                         )
 
-                        st.success(
-                            "Query executed successfully!"
+                        # Execute the reference query and compare actual result sets.
+                        expected_columns, expected_rows = run_quiz_query(
+                            question["hint_sql"]
                         )
-
-                        st.dataframe(
-                            result_df,
-                            use_container_width=True,
+                        is_correct = grade_sql_answer(
+                            columns, rows, expected_columns, expected_rows
                         )
+                        grading_results[qid] = {
+                            "sql": sql_answer,
+                            "correct": is_correct,
+                        }
 
+                        st.success("Query executed successfully!")
+                        st.dataframe(result_df, use_container_width=True)
                         st.caption(
                             f"Returned {len(rows)} rows "
                             "(maximum 100 displayed)."
                         )
 
                     except Exception as e:
-                        st.error(
-                            f"SQL execution error: {e}"
-                        )
+                        # An invalid query cannot retain an earlier score.
+                        grading_results.pop(qid, None)
+                        st.error(f"SQL execution error: {e}")
+
+        # Show the grade for the currently displayed SQL only.
+        # Editing an answer invalidates its previous grade until Run SQL is clicked.
+        current_grade = grading_results.get(qid)
+        if current_grade and current_grade["sql"] == sql_answer:
+            if current_grade["correct"]:
+                st.success(f"Correct! {points} / {points} points")
+            else:
+                st.warning(f"Incorrect result. 0 / {points} points")
+        elif current_grade:
+            st.info("Answer changed. Click Run SQL to check your new answer.")
 
         # ----------------------------------------------------
         # Save Answer
@@ -676,8 +724,25 @@ st.write(
     f"**Total possible points:** {total_points}"
 )
 
+earned_points = 0
+correct_count = 0
+checked_count = 0
+for question in QUESTIONS:
+    qid = question["id"]
+    grade = grading_results.get(qid)
+    current_sql = st.session_state.get(f"answer_{user_id}_{qid}", "")
+    if grade and grade["sql"] == current_sql:
+        checked_count += 1
+        if grade["correct"]:
+            earned_points += question["points"]
+            correct_count += 1
+
+st.metric("Your Score", f"{earned_points} / {total_points}")
+st.progress(earned_points / total_points if total_points else 0)
+st.write(f"**Correct answers:** {correct_count} / {len(QUESTIONS)}")
 st.caption(
-    "This quiz provides SQL practice against a live "
-    "PostgreSQL database. Answers are saved per user. "
-    "Running a query does not automatically grade it."
+    f"Checked answers: {checked_count} / {len(QUESTIONS)}. "
+    "Scores reflect only answers checked with Run SQL in this session. "
+    "Editing SQL invalidates its previous grade; click Run SQL again. "
+    "Saved SQL answers persist in Supabase, but scores are not saved."
 )
