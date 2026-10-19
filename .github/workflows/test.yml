@@ -1,0 +1,31 @@
+name: SQL Quiz Database Test
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  test-database:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Test Supabase database connection
+        env:
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_PORT: ${{ secrets.DB_PORT }}
+          QUIZ_DB_USER: ${{ secrets.QUIZ_DB_USER }}
+          QUIZ_DB_PASSWORD: ${{ secrets.QUIZ_DB_PASSWORD }}
+        run: |
+          python -c "from quiz_db import run_quiz_query; columns, rows = run_quiz_query('SELECT name, rating FROM restaurants ORDER BY rating DESC LIMIT 3'); assert len(rows) == 3; print('Database test passed:', columns, rows)"
