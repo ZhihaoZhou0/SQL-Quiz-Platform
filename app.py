@@ -65,10 +65,17 @@ def save_login_session(response):
 
 
 def sign_out():
-    """Clear the current Streamlit login session."""
+    """Clear authentication and quiz session state."""
+
+    # Clear authentication information
     st.session_state.user = None
     st.session_state.access_token = None
     st.session_state.refresh_token = None
+
+    # Clear cached quiz answers and text area values
+    for key in list(st.session_state.keys()):
+        if key.startswith(("loaded_answers_", "answer_")):
+            del st.session_state[key]
 
 
 def verify_current_user():
@@ -448,13 +455,21 @@ st.info(
     "Click Save Answer to store your SQL."
 )
 
-# Load saved answers once for this authenticated user.
+# Load saved answers when the authenticated user changes
+# or starts a new quiz session.
 answers_state_key = f"loaded_answers_{user_id}"
 
 if answers_state_key not in st.session_state:
     try:
         saved_answers = load_answers(user_id)
+
         st.session_state[answers_state_key] = saved_answers
+
+        # Restore saved SQL into each question's text area.
+        for qid, answer_sql in saved_answers.items():
+            answer_key = f"answer_{user_id}_{qid}"
+            st.session_state[answer_key] = answer_sql
+
     except Exception as e:
         st.error(f"Unable to load saved answers: {e}")
         st.stop()
