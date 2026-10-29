@@ -1,8 +1,8 @@
 # Restaurant SQL Quiz Platform
 
-A live, authenticated SQL quiz built for **Duke University IDS 706 (Data Engineering)**. Students sign in, write SQL queries against a hosted PostgreSQL database, inspect the returned rows, and save their answers. The quiz contains **five questions worth four points each (20 points total)**. It also provides optional automatic feedback by comparing query results with reference results.
+A live, authenticated SQL quiz and RAG-powered Text-to-SQL application built for **Duke University IDS 706 (Data Engineering)**. Students sign in, write SQL queries against a hosted PostgreSQL database, inspect the returned rows, and save their answers. The quiz contains **five questions worth four points each (20 points total)**. It also offers automatic grading and an optional RAG-powered SQL generator using ChromaDB and Google Gemini.
 
-**Live quiz:** https://ids706-restaurant-sql-quiz.streamlit.app/  
+**Live application:** https://ids706-restaurant-sql-quiz.streamlit.app/  
 **Source code:** https://github.com/ZhihaoZhou0/SQL-Quiz-Platform
 
 ## Features
@@ -12,6 +12,8 @@ A live, authenticated SQL quiz built for **Duke University IDS 706 (Data Enginee
 - **Interactive SQL quiz:** Each question includes a prompt, a SQL editor, a **Run SQL** button, and an expandable hint showing both the expected SQL and its expected result table.
 - **Automatic feedback:** Running SQL displays the result table and checks it against the reference query's result set. The quiz shows per-question feedback and a score out of 20; it does **not** require matching the reference SQL text.
 - **Saved answers:** **Save Answer** writes each authenticated user's SQL to PostgreSQL. Saved SQL is restored when the user signs in again.
+- **RAG-powered Text-to-SQL:** ChromaDB retrieves relevant schema, business rules, and SQL examples; Google Gemini uses the retrieved context to generate SQL from natural-language questions.
+- **AI query execution and validation:** Generated SQL runs through the read-only database role, and the result is compared with the selected quiz question’s expected result.
 - **GitHub Actions:** A workflow installs dependencies and tests a live database query using credentials supplied through GitHub Actions Secrets.
 
 ## Technology Stack
@@ -22,6 +24,9 @@ A live, authenticated SQL quiz built for **Duke University IDS 706 (Data Enginee
 | Hosted database | Supabase PostgreSQL | Restaurant data and saved answers |
 | Authentication | Supabase Auth | Sign-up, sign-in, and user identity |
 | Database access | `psycopg2` | Execute SQL and persist answers |
+| Vector database | ChromaDB | Retrieve relevant SQL examples and schema knowledge |
+| Embeddings | scikit-learn `HashingVectorizer` | Deterministic 512-dimensional text vectors |
+| AI API | Google Gemini (`google-genai`) | Generate SQL from retrieved context |
 | Data display/comparison | pandas | Render and compare query results |
 | CI | GitHub Actions + GitHub Secrets | Automated live database connectivity test |
 | Deployment | Streamlit Community Cloud | Publicly accessible quiz website |
@@ -66,6 +71,8 @@ Student-entered queries are executed through the restricted PostgreSQL **`quiz_r
 | --- | --- |
 | `app.py` | Streamlit UI, Supabase Auth, questions, answer persistence, and grading |
 | `quiz_db.py` | Restricted connection and execution of student SQL |
+| `rag.py` | ChromaDB knowledge retrieval and Gemini-powered SQL generation |
+| `screenshots/` | Evidence of SQL generation, retrieval, execution, and validation |
 | `init.sql` | Restaurant database setup/sample data |
 | `query.py` | Database-query example from the course lab |
 | `test_quiz_connection.py` | Database connectivity test script |
@@ -75,7 +82,7 @@ Student-entered queries are executed through the restricted PostgreSQL **`quiz_r
 
 ## Run Locally
 
-**Prerequisites:** Python 3.12 (recommended), a Supabase project with the required tables and data, and the appropriate database roles/permissions.
+**Prerequisites:** Python 3.12 (recommended), a Supabase project with the required tables and data, appropriate database roles/permissions, and a Gemini API key.
 
 1. Clone the repository and open its folder:
 
@@ -89,7 +96,7 @@ Student-entered queries are executed through the restricted PostgreSQL **`quiz_r
    ```bash
    python -m venv .venv
    # Windows PowerShell:
-   .venv\Scripts\Activate.ps1
+   .\.venv\Scripts\Activate.ps1
    pip install -r requirements.txt
    ```
 
@@ -110,6 +117,9 @@ Student-entered queries are executed through the restricted PostgreSQL **`quiz_r
 
    QUIZ_DB_USER=your_read_only_pooler_username
    QUIZ_DB_PASSWORD=your_read_only_database_password
+
+   GEMINI_API_KEY=your_gemini_api_key
+   GEMINI_MODEL=gemini-3.5-flash-lite
    ```
 
    Use the **Supabase Session pooler** connection details rather than the Direct connection. The database connections in the application use `sslmode=require`. Copy the exact host, port, and usernames shown by your Supabase project; the values above are placeholders.
@@ -138,7 +148,7 @@ The CI test uses the restricted reader account. **`.env` is excluded by `.gitign
 
 ## Deployment
 
-The app is deployed on **Streamlit Community Cloud** from the GitHub repository. Runtime credentials are configured as private deployment secrets/environment variables, rather than stored in the source code. Supabase Auth is configured to allow the deployed website URL for authentication redirects.
+The app is deployed on **Streamlit Community Cloud** from the GitHub repository. Runtime credentials, including the Gemini API key, are configured as private deployment secrets/environment variables, rather than stored in the source code. Supabase Auth is configured to allow the deployed website URL for authentication redirects.
 
 **Deployed app:** https://ids706-restaurant-sql-quiz.streamlit.app/
 
@@ -158,56 +168,100 @@ Created for **IDS 706 — Data Engineering**, Duke University. The project demon
 
 ## Week 8 Optional Extension: RAG-Powered Text-to-SQL
 
-The existing SQL Quiz has an **AI SQL Generator (RAG)** section for signed-in users.
+The **AI SQL Generator (RAG)** extends the Week 7 quiz with natural-language-to-SQL generation, real vector retrieval, and automatic SQL execution and validation. The same deployed Streamlit application supports both the original quiz and this optional extension.
 
-**Live application:** https://ids706-restaurant-sql-quiz.streamlit.app/
+**Try it live:** https://ids706-restaurant-sql-quiz.streamlit.app/
 
-### Architecture
+### RAG Architecture
 
-1. A signed-in user chooses a quiz question and enters a natural-language request.
-2. `rag.py` embeds the request using a deterministic 512-dimensional hashing vectorizer and performs **real ChromaDB vector similarity retrieval** against database schema, business rules, and five SQL examples. The Chroma collection is initialized in memory from those documents; it does not require a separate hosted service or model download.
-3. The retrieved documents are included in the prompt sent to **Google Gemini** using the `google-genai` API (`gemini-2.5-flash` by default, configurable through `GEMINI_MODEL`).
-4. The app displays generated SQL and the retrieved knowledge documents/distances.
-5. For extra credit, the app automatically executes generated SQL through the restricted PostgreSQL `quiz_reader` account, displays the result table, and compares results against the selected quiz question's expected SQL output.
+```text
+Natural-language question
+          |
+          v
+HashingVectorizer (512-dimensional text embedding)
+          |
+          v
+ChromaDB similarity search (schema, rules, SQL examples)
+          |
+          v
+Retrieved context + user question
+          |
+          v
+Google Gemini API -> generated PostgreSQL SELECT
+          |
+          v
+Supabase PostgreSQL (read-only execution)
+          |
+          v
+Result table + comparison with expected quiz result
+```
 
-**Pipeline:** Natural-language question → ChromaDB vector retrieval → Gemini API → SQL → read-only PostgreSQL execution → result validation.
+1. **Input:** A signed-in user selects a quiz question and enters a natural-language request.
+2. **Retrieval:** `rag.py` builds deterministic 512-dimensional vectors with scikit-learn's `HashingVectorizer`. ChromaDB performs **actual vector similarity search** over restaurant schema information, column meanings, business rules, and five question–SQL examples. The retrieved documents and cosine distances are visible in the interface.
+3. **Generation:** The retrieved documents are inserted into the prompt sent to **Google Gemini** through the `google-genai` SDK. The tested deployment uses `gemini-3.5-flash-lite` via the `GEMINI_MODEL` setting.
+4. **Execution (extra credit):** The generated SQL is executed against Supabase PostgreSQL through the existing restricted `quiz_reader` role, and the resulting rows are displayed.
+5. **Validation (extra credit):** The returned columns and rows are compared with the selected quiz question's reference result. The app displays **Correct** or **Incorrect**; it does not require an exact SQL-text match.
 
-### Run locally
+The ChromaDB collection is **in-memory**, initialized from the knowledge documents when needed. No separate ChromaDB server, hosted vector service, or embedding-model download is required. The vectorizer is a deterministic hashing representation rather than a pretrained semantic embedding model.
 
-Use the same Supabase database, Supabase Auth, and `.env` configuration from Week 7. Add the following to your local `.env` (never commit this file):
+### Screenshots and Demonstration
+
+**1. Natural-language question → generated SQL**
+
+![Natural-language question and Gemini-generated SQL](screenshots/rag_generated_sql.png)
+
+**2. Automatic SQL execution and result validation (extra credit)**
+
+![Executed SQL result table and automatic validation outcome](screenshots/rag_execution_validation.png)
+
+**3. Actual ChromaDB retrieval evidence**
+
+The interface exposes the retrieved documents and cosine distances, demonstrating that vector retrieval is part of the generation workflow.
+
+![Retrieved ChromaDB documents with cosine distances](screenshots/rag_vector_retrieval.png)
+
+### How to Try the RAG Feature
+
+1. Open the [deployed application](https://ids706-restaurant-sql-quiz.streamlit.app/) and sign in.
+2. Scroll to **AI SQL Generator (RAG)** and choose a quiz question.
+3. Enter a natural-language question or use the provided question text.
+4. Click **Generate SQL with Gemini + Run + Validate**.
+5. Review the **Generated SQL**, expand **Retrieved context from ChromaDB** to inspect the retrieved documents, and review the **Result Table** and **Automatic Result Validation**.
+
+### Local Configuration
+
+Follow the [Run Locally](#run-locally) section above to set up PostgreSQL, Supabase Auth, and Python dependencies. Add these values to your local `.env` (never commit it):
 
 ```dotenv
 GEMINI_API_KEY=your_gemini_api_key
-GEMINI_MODEL=gemini-2.5-flash
+GEMINI_MODEL=gemini-3.5-flash-lite
 ```
 
-From the project folder, with your virtual environment activated:
+Then run:
 
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Sign in, scroll to **AI SQL Generator (RAG)**, select a quiz question, and click **Generate SQL with Gemini + Run + Validate**. Expand **Retrieved context from ChromaDB** to inspect retrieved documents and distances.
+`rag.py` has a fallback model name in its source, but the explicitly configured `GEMINI_MODEL` above is the model used for the tested deployment.
 
-### Streamlit Cloud deployment
+### Streamlit Cloud Configuration
 
-In the existing app's **Settings → Secrets**, retain all Week 7 secrets and add:
+In the deployed application's **Settings → Secrets**, keep the existing Supabase and PostgreSQL values and add the following TOML entries:
 
 ```toml
 GEMINI_API_KEY = "your_gemini_api_key"
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.5-flash-lite"
 ```
 
-Push the updated code to GitHub and allow Streamlit Cloud to rebuild. API credentials must remain only in `.env` / Streamlit Secrets, not in committed files. The Chroma collection is rebuilt automatically when the deployed app starts; no separate Chroma server is needed.
+After saving, allow the application to restart and test the complete RAG workflow on the public URL. Keep real API keys and database passwords out of the repository.
 
-### Required screenshots (add after deployment)
+### Safety and Limitations
 
-- **Basic:** A natural-language question and its AI-generated SQL. Save as `screenshots/rag_generated_sql.png`.
-- **Extra credit:** Generated SQL, executed result table, and Correct/Incorrect validation. Save as `screenshots/rag_execution_validation.png`.
-
-After taking the screenshots, commit them to the repository and replace this paragraph with embedded Markdown image references. Screenshots cannot be captured as evidence until the deployed API integration has actually been tested.
-
-### Security notes
-
-Only single-statement `SELECT` SQL is passed to the existing `run_quiz_query` function. It uses a PostgreSQL read-only account, read-only transactions, a 5-second statement timeout, and a 100-row display limit. Generated SQL is never executed with the privileged account used for saving answers. This is a classroom demo, not a production-grade SQL sandbox.
+- The application accepts only a single generated `SELECT` statement and uses the existing read-only PostgreSQL query runner.
+- SQL execution uses a restricted database role, read-only transactions, a five-second statement timeout, and a 100-row display limit.
+- The privileged connection used to save quiz answers is not used to execute generated SQL.
+- The small knowledge base focuses on the restaurant quiz; it is not a general-purpose Text-to-SQL benchmark.
+- Generated SQL can be inaccurate. Validation checks the selected quiz question's result set and is intended as classroom feedback, not a proof of SQL equivalence.
+- This is an educational demonstration, not a production-grade SQL sandbox.
