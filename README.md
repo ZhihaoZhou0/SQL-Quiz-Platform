@@ -154,3 +154,60 @@ The app is deployed on **Streamlit Community Cloud** from the GitHub repository.
 ## Assignment
 
 Created for **IDS 706 — Data Engineering**, Duke University. The project demonstrates a hosted PostgreSQL database, authenticated query/save access, a GitHub Actions workflow using secrets, and a live 20-point SQL quiz.
+
+
+## Week 8 Optional Extension: RAG-Powered Text-to-SQL
+
+The existing SQL Quiz has an **AI SQL Generator (RAG)** section for signed-in users.
+
+**Live application:** https://ids706-restaurant-sql-quiz.streamlit.app/
+
+### Architecture
+
+1. A signed-in user chooses a quiz question and enters a natural-language request.
+2. `rag.py` embeds the request using a deterministic 512-dimensional hashing vectorizer and performs **real ChromaDB vector similarity retrieval** against database schema, business rules, and five SQL examples. The Chroma collection is initialized in memory from those documents; it does not require a separate hosted service or model download.
+3. The retrieved documents are included in the prompt sent to **Google Gemini** using the `google-genai` API (`gemini-2.5-flash` by default, configurable through `GEMINI_MODEL`).
+4. The app displays generated SQL and the retrieved knowledge documents/distances.
+5. For extra credit, the app automatically executes generated SQL through the restricted PostgreSQL `quiz_reader` account, displays the result table, and compares results against the selected quiz question's expected SQL output.
+
+**Pipeline:** Natural-language question → ChromaDB vector retrieval → Gemini API → SQL → read-only PostgreSQL execution → result validation.
+
+### Run locally
+
+Use the same Supabase database, Supabase Auth, and `.env` configuration from Week 7. Add the following to your local `.env` (never commit this file):
+
+```dotenv
+GEMINI_API_KEY=your_gemini_api_key
+GEMINI_MODEL=gemini-2.5-flash
+```
+
+From the project folder, with your virtual environment activated:
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+Sign in, scroll to **AI SQL Generator (RAG)**, select a quiz question, and click **Generate SQL with Gemini + Run + Validate**. Expand **Retrieved context from ChromaDB** to inspect retrieved documents and distances.
+
+### Streamlit Cloud deployment
+
+In the existing app's **Settings → Secrets**, retain all Week 7 secrets and add:
+
+```toml
+GEMINI_API_KEY = "your_gemini_api_key"
+GEMINI_MODEL = "gemini-2.5-flash"
+```
+
+Push the updated code to GitHub and allow Streamlit Cloud to rebuild. API credentials must remain only in `.env` / Streamlit Secrets, not in committed files. The Chroma collection is rebuilt automatically when the deployed app starts; no separate Chroma server is needed.
+
+### Required screenshots (add after deployment)
+
+- **Basic:** A natural-language question and its AI-generated SQL. Save as `screenshots/rag_generated_sql.png`.
+- **Extra credit:** Generated SQL, executed result table, and Correct/Incorrect validation. Save as `screenshots/rag_execution_validation.png`.
+
+After taking the screenshots, commit them to the repository and replace this paragraph with embedded Markdown image references. Screenshots cannot be captured as evidence until the deployed API integration has actually been tested.
+
+### Security notes
+
+Only single-statement `SELECT` SQL is passed to the existing `run_quiz_query` function. It uses a PostgreSQL read-only account, read-only transactions, a 5-second statement timeout, and a 100-row display limit. Generated SQL is never executed with the privileged account used for saving answers. This is a classroom demo, not a production-grade SQL sandbox.

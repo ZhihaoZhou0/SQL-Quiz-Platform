@@ -222,3 +222,7 @@ __marimo__/
 # Additional environment files
 .env.*
 !.env.example
+
+# ChromaDB local vector database
+chroma_db/
+chroma_data/

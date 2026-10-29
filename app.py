@@ -8,6 +8,7 @@ import streamlit as st
 from dotenv import load_dotenv
 from supabase import create_client
 from quiz_db import run_quiz_query
+from rag import generate_sql
 
 
 # ============================================================
@@ -15,6 +16,19 @@ from quiz_db import run_quiz_query
 # ============================================================
 
 load_dotenv()
+
+# Streamlit Community Cloud stores secrets in st.secrets, not necessarily os.environ.
+# Existing Supabase / PostgreSQL code uses os.getenv, so bridge the configured keys.
+try:
+    for secret_name in (
+        "SUPABASE_URL", "SUPABASE_KEY", "POSTGRES_DB", "POSTGRES_USER",
+        "POSTGRES_PASSWORD", "DB_HOST", "DB_PORT", "QUIZ_DB_USER",
+        "QUIZ_DB_PASSWORD", "GEMINI_API_KEY", "GEMINI_MODEL",
+    ):
+        if secret_name in st.secrets and not os.getenv(secret_name):
+            os.environ[secret_name] = str(st.secrets[secret_name])
+except FileNotFoundError:
+    pass  # Local .env is sufficient.
 
 st.set_page_config(
     page_title="SQL Quiz Platform",
@@ -75,7 +89,7 @@ def sign_out():
 
     # Clear cached quiz answers and text area values
     for key in list(st.session_state.keys()):
-        if key.startswith(("loaded_answers_", "answer_", "grading_results_")):
+        if key.startswith(("loaded_answers_", "answer_", "grading_results_", "rag_")):
             del st.session_state[key]
 
 
@@ -701,6 +715,81 @@ for question in QUESTIONS:
 
     st.write("")
 
+
+
+# ============================================================
+# 9b. RAG-powered Text-to-SQL (Week 8 optional extension)
+# ============================================================
+
+st.divider()
+st.header("✨ AI SQL Generator (RAG)")
+st.write(
+    "Ask a natural-language question about the restaurant database. "
+    "ChromaDB retrieves relevant schema and SQL examples; Gemini uses that "
+    "retrieved context to generate SQL. The query is then automatically "
+    "executed using the read-only database account."
+)
+
+selected_id = st.selectbox(
+    "Choose the quiz question for validation:",
+    options=[q["id"] for q in QUESTIONS],
+    format_func=lambda qid: next(f"Question {q['id']}: {q['title']}" for q in QUESTIONS if q["id"] == qid),
+)
+selected_question = next(q for q in QUESTIONS if q["id"] == selected_id)
+question_text = st.text_area(
+    "Natural-language question:",
+    value=selected_question["description"],
+    key=f"rag_question_{user_id}_{selected_id}",
+    height=105,
+)
+
+if st.button("✨ Generate SQL with Gemini + Run + Validate", key="rag_generate", type="primary"):
+    if not verify_current_user():
+        st.error("Your session has expired. Please sign in again.")
+        st.stop()
+    if not question_text.strip():
+        st.warning("Enter a question first.")
+    else:
+        # Never reuse a previous result when a generation or execution fails.
+        st.session_state.pop(f"rag_result_{user_id}", None)
+        try:
+            with st.spinner("Retrieving context from ChromaDB and calling Gemini..."):
+                generated_sql, retrieved = generate_sql(question_text, QUESTIONS)
+            result = {"question_id": selected_id, "question": question_text,
+                      "sql": generated_sql, "retrieved": retrieved}
+            # Automatic execution uses quiz_reader; never use the privileged connection.
+            try:
+                cols, rows = run_quiz_query(generated_sql)
+                expected_cols, expected_rows = run_quiz_query(selected_question["hint_sql"])
+                result.update({"columns": cols, "rows": rows,
+                               "correct": grade_sql_answer(cols, rows, expected_cols, expected_rows)})
+            except Exception as execution_error:
+                result["execution_error"] = str(execution_error)
+            st.session_state[f"rag_result_{user_id}"] = result
+        except Exception as generation_error:
+            st.error(f"RAG generation failed: {generation_error}")
+
+rag_result = st.session_state.get(f"rag_result_{user_id}")
+if rag_result:
+    st.subheader("Generated SQL")
+    st.code(rag_result["sql"], language="sql")
+    st.caption(f"Generated for quiz question {rag_result['question_id']}.")
+    with st.expander("🔎 Retrieved context from ChromaDB (proof of vector retrieval)"):
+        for i, hit in enumerate(rag_result["retrieved"], 1):
+            st.markdown(f"**Retrieved document {i}** — cosine distance: {hit['distance']:.3f}")
+            st.text(hit["document"])
+    if "execution_error" in rag_result:
+        st.warning(f"Automatic SQL execution failed: {rag_result['execution_error']}")
+    else:
+        st.subheader("Automatic SQL Execution — Result Table")
+        st.dataframe(pd.DataFrame(rag_result["rows"], columns=rag_result["columns"]), use_container_width=True)
+        st.caption(f"Returned {len(rag_result['rows'])} rows (maximum 100 displayed).")
+        st.subheader("Automatic Result Validation")
+        if rag_result["correct"]:
+            st.success("✅ Correct — Generated SQL matches the selected quiz question's expected result.")
+        else:
+            st.warning("❌ Incorrect — Result differs from the selected quiz question's expected result.")
+        st.caption("Validation compares result columns and rows, not SQL text. Results are not saved as quiz answers.")
 
 # ============================================================
 # 10. Quiz Summary
